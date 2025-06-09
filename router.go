@@ -14,7 +14,7 @@ func NewRouter() http.Handler {
 	r.Use(middleware.Recoverer)
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("Welcome to task manager api"))
+		w.Write([]byte("Welcome to the task manager api"))
 	})
 
 	r.Route("/tasks", func(r chi.Router) {
@@ -22,6 +22,9 @@ func NewRouter() http.Handler {
 		r.Post("/", CreateTask)
 		r.Get("/{id}", GetTaskByID)
 		r.Delete("/{id}", DeleteTask)
+		r.Put("/{id}", UpdateTask)
+		r.Get("/", GetAllFilter)
 	})
 	return r
+
 }
