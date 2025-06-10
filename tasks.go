@@ -1,12 +1,13 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"sync"
 
 	"github.com/go-chi/chi"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type Task struct {
@@ -15,23 +16,27 @@ type Task struct {
 	Done  bool   `json:"done"`
 }
 
-var (
-	tasks     = make(map[int]Task)
-	taskMutex sync.Mutex
-	nextID    = 1
-)
-
 func GetAllTasks(w http.ResponseWriter, r *http.Request) {
 
-	taskMutex.Lock()
-	defer taskMutex.Unlock()
-
-	var allTasks []Task
-	for _, t := range tasks {
-		allTasks = append(allTasks, t)
+	rows, err := db.Query("SELECT id, title, done FROM tasks")
+	if err != nil {
+		http.Error(w, "failed to fetch tasks", http.StatusInternalServerError)
+		return
 	}
+	defer rows.Close()
 
-	json.NewEncoder(w).Encode(allTasks)
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		err := rows.Scan(&t.ID, &t.Title, &t.Done)
+		if err != nil {
+			http.Error(w, "scan error", http.StatusInternalServerError)
+			return
+		}
+		tasks = append(tasks, t)
+	}
+	json.NewEncoder(w).Encode(&tasks)
+
 }
 
 func CreateTask(w http.ResponseWriter, r *http.Request) {
@@ -41,11 +46,12 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	taskMutex.Lock()
-	t.ID = nextID
-	nextID++
-	tasks[t.ID] = t
-	taskMutex.Unlock()
+	id, err := InserTask(t.Title, t.Done)
+	if err != nil {
+		http.Error(w, "failed to insert task", http.StatusInternalServerError)
+		return
+	}
+	t.ID = id
 	json.NewEncoder(w).Encode(t)
 
 }
@@ -57,15 +63,17 @@ func GetTaskByID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 	}
 
-	taskMutex.Lock()
-	defer taskMutex.Unlock()
-
-	task, ok := tasks[id]
-	if !ok {
+	var t Task
+	err = db.QueryRow("SELECT id, title, done FROM tasks WHERE id = ?", id).Scan(&t.ID, &t.Title, &t.Done)
+	if err != sql.ErrNoRows {
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
+	} else if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
 	}
-	json.NewEncoder(w).Encode(task)
+
+	json.NewEncoder(w).Encode(t)
 
 }
 
@@ -74,72 +82,80 @@ func DeleteTask(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
 	}
 
-	taskMutex.Lock()
-	defer taskMutex.Unlock()
-	_, ok := tasks[id]
-	if !ok {
+	result, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	}
-	delete(tasks, id)
-	w.WriteHeader(http.StatusNoContent)
 
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func UpdateTask(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		http.Error(w, "invalid id task", http.StatusBadRequest)
+		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
-	var updated Task
-	if err := json.NewDecoder(r.Body).Decode(&updated); err != nil {
+
+	var t Task
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
-	}
-
-	taskMutex.Lock()
-	defer taskMutex.Unlock()
-
-	task, ok := tasks[id]
-	if !ok {
-		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	}
 
-	task.Title = updated.Title
-	task.Done = updated.Done
-	tasks[id] = task
+	_, err = db.Exec("UPDATE tasks SET title = ?, done = ? WHERE id = ?", t.Title, t.Done, id)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(task)
-
+	t.ID = id
+	json.NewEncoder(w).Encode(t)
 }
 
 func GetAllFilter(w http.ResponseWriter, r *http.Request) {
+	filterDone := r.URL.Query().Get("done")
 
-	query := r.URL.Query()
-	filterDone := query.Get("done")
-	taskMutex.Lock()
-	defer taskMutex.Unlock()
+	query := "SELECT id, title, done FROM tasks"
+	var args []interface{}
 
-	var results []Task
-
-	for _, task := range tasks {
-		if filterDone != "" {
-			wantDone, err := strconv.ParseBool(filterDone)
-			if err != nil {
-				http.Error(w, "invalid 'done' query value", http.StatusBadRequest)
-				return
-			}
-			if task.Done != wantDone {
-				continue
-			}
+	if filterDone != "" {
+		query += " WHERE done = ?"
+		val, err := strconv.ParseBool(filterDone)
+		if err != nil {
+			http.Error(w, "invalid 'done' value", http.StatusBadRequest)
+			return
 		}
-		results = append(results, task)
+		args = append(args, val)
 	}
-	w.Header().Set("content-type", "application/json")
-	json.NewEncoder(w).Encode(results)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.ID, &t.Title, &t.Done); err != nil {
+			http.Error(w, "scan error", http.StatusInternalServerError)
+			return
+		}
+		tasks = append(tasks, t)
+	}
+
+	json.NewEncoder(w).Encode(tasks)
 }

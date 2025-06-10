@@ -6,6 +6,7 @@ import (
 )
 
 func main() {
+	InitDB("tasks.db")
 	r := NewRouter()
 
 	log.Println("server is running on localhost:8888")
