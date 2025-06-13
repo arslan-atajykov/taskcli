@@ -61,11 +61,13 @@ func GetTaskByID(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(idStr)
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
 	}
 
 	var t Task
 	err = db.QueryRow("SELECT id, title, done FROM tasks WHERE id = ?", id).Scan(&t.ID, &t.Title, &t.Done)
-	if err != sql.ErrNoRows {
+
+	if err == sql.ErrNoRows {
 		http.Error(w, "task not found", http.StatusNotFound)
 		return
 	} else if err != nil {
@@ -74,7 +76,6 @@ func GetTaskByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(t)
-
 }
 
 func DeleteTask(w http.ResponseWriter, r *http.Request) {

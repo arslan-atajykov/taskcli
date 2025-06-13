@@ -18,6 +18,7 @@ func NewRouter() http.Handler {
 	})
 
 	r.Route("/tasks", func(r chi.Router) {
+		r.Use(AuthMiddleware)
 		r.Get("/", GetAllTasks)
 		r.Post("/", CreateTask)
 		r.Get("/{id}", GetTaskByID)
